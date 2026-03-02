@@ -17,44 +17,61 @@
 const char* ssid = "ESP32_PWM";
 const char* password = "12345678";
 
+// ================= DEBUG CONTROL =================
+#define DEBUG_ENABLED 1
+
+#if DEBUG_ENABLED
+  #define DEBUG_PRINT(x) Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTF(...)
+#endif
+// =================================================
+
 // --- Pins ---
-const int PWM1_PIN = 18; // LEDC channel 0
-const int PWM2_PIN = 19; // LEDC channel 1
+#define PWM1_PIN            18
+#define PWM2_PIN            19
 
-const int FREQ_UP_PIN   = 12;
-const int FREQ_DOWN_PIN = 14;
-const int DUTY_UP_PIN   = 26;
-const int DUTY_DOWN_PIN = 27;
-
-const int DEBUG_TOGGLE_PIN = 2; // toggled each frequency change (measure with scope)
-
+#define FREQ_UP_PIN         12
+#define FREQ_DOWN_PIN       14
+#define DUTY_UP_PIN         26
+#define DUTY_DOWN_PIN       27
+#define DEBUG_TOGGLE_PIN    2
 // LEDC config
-const ledc_channel_t CHANNEL_0 = LEDC_CHANNEL_0;
-const ledc_channel_t CHANNEL_1 = LEDC_CHANNEL_1;
-const ledc_timer_t TIMER_SEL = LEDC_TIMER_0;
-const ledc_mode_t SPEED_MODE = LEDC_HIGH_SPEED_MODE;
-const int PWM_RESOLUTION = 10; // bits
-const ledc_timer_bit_t LEDC_RES = LEDC_TIMER_10_BIT;
+#define CHANNEL_0 LEDC_CHANNEL_0
+#define CHANNEL_1 LEDC_CHANNEL_1
+#define TIMER0_SEL LEDC_TIMER_0
+#define TIMER1_SEL LEDC_TIMER_1
+#define SPEED_MODE LEDC_HIGH_SPEED_MODE
+#define PWM_RESOLUTION 10
+#define LEDC_RES LEDC_TIMER_10_BIT
 
 // Frequency/duty variables
-unsigned long freqHz = 10;
-const unsigned long MIN_FREQ = 1;
-const unsigned long MAX_FREQ = 150;
+#define MIN_FREQ 10UL
+#define MAX_FREQ 10000UL
+unsigned long freqHz = MIN_FREQ;
+
 float duty = 0.5f; // 0..1
 
 // Steps
-const unsigned long FREQ_STEP_FINE = 1;
-const unsigned long FREQ_STEP_COARSE = 5;
+#define FREQ_STEP_FINE 1
+#define FREQ_STEP_COARSE 5
 unsigned long currentFreqStep = FREQ_STEP_FINE;
 bool freqStepFineMode = true;
-const float DUTY_STEP = 0.05f; // 5%
+#define DUTY_STEP 0.05f
 
-// Debounce/repeat
-const unsigned long DEBOUNCE_MS = 40;
-const unsigned long REPEAT_SUPPRESS_MS = 120;
+// Timing
+#define DEBOUNCE_MS 40UL
+#define REPEAT_SUPPRESS_MS 120UL
+#define TOGGLE_HOLD_MS 800UL
+#define TOGGLE_SUPPRESS_MS 1000UL
 
-// Toggle hold
-const unsigned long TOGGLE_HOLD_MS = 800;
+#define INITIAL_REPEAT_DELAY 400UL   // start repeating after hold
+#define FAST_REPEAT_DELAY    100UL   // repeat speed after start
+
 unsigned long bothFreqHeldSince = 0;
 unsigned long lastToggleTime = 0;
 const unsigned long TOGGLE_SUPPRESS_MS = 1000;
@@ -85,6 +102,7 @@ void setup() {
 	Serial.begin(115200);
 	delay(50);
 
+    DEBUG_PRINTLN("=== ESP32 PWM DEBUG START ===");
 	pinMode(FREQ_UP_PIN, INPUT_PULLUP);
 	pinMode(FREQ_DOWN_PIN, INPUT_PULLUP);
 	pinMode(DUTY_UP_PIN, INPUT_PULLUP);
@@ -115,11 +133,14 @@ void loop() {
 	int rawFreqDown = digitalRead(FREQ_DOWN_PIN);
 
 	if (rawFreqUp == LOW && rawFreqDown == LOW) {
-		if (bothFreqHeldSince == 0) bothFreqHeldSince = now;
-		if ((now - bothFreqHeldSince >= TOGGLE_HOLD_MS) && (now - lastToggleTime >= TOGGLE_SUPPRESS_MS)) {
-        toggleFreqStepMode();
-		lastToggleTime = now;
-		delay(120);
+		if (bothFreqHeldSince == 0) {
+			bothFreqHeldSince = now;
+		}
+		if ((now - bothFreqHeldSince >= TOGGLE_HOLD_MS) && 
+			(now - lastToggleTime >= TOGGLE_SUPPRESS_MS)) {
+        	toggleFreqStepMode();
+			lastToggleTime = now;
+			delay(120);
 		}
 	} else {
 		bothFreqHeldSince = 0;
