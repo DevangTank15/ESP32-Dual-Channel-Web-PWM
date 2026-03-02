@@ -74,6 +74,9 @@ bool freqStepFineMode = true;
 #define INITIAL_REPEAT_DELAY 400UL   // start repeating after hold
 #define FAST_REPEAT_DELAY    100UL   // repeat speed after start
 
+unsigned int holdRepeatCount = 0;
+bool smartStepMode = false;
+
 unsigned long bothFreqHeldSince = 0;
 unsigned long lastToggleTime = 0;
 
@@ -88,11 +91,14 @@ struct ButtonState {
   int lastRaw;
   unsigned long lastChange;
   unsigned long lastAction;
+  unsigned long pressStart;
+  bool repeating;
 };
-ButtonState btnFreqUp   = {FREQ_UP_PIN,    HIGH, 0, 0};
-ButtonState btnFreqDown = {FREQ_DOWN_PIN,  HIGH, 0, 0};
-ButtonState btnDutyUp   = {DUTY_UP_PIN,    HIGH, 0, 0};
-ButtonState btnDutyDown = {DUTY_DOWN_PIN,  HIGH, 0, 0};
+
+ButtonState btnFreqUp   = {FREQ_UP_PIN,    HIGH, 0, 0, 0, false};
+ButtonState btnFreqDown = {FREQ_DOWN_PIN,  HIGH, 0, 0, 0, false};
+ButtonState btnDutyUp   = {DUTY_UP_PIN,    HIGH, 0, 0, 0, false};
+ButtonState btnDutyDown = {DUTY_DOWN_PIN,  HIGH, 0, 0, 0, false};
 
 WebServer server(80);
 
@@ -100,12 +106,11 @@ WebServer server(80);
 void configureLedcTimer(unsigned long frequencyHz, ledc_channel_t channel);
 void configureLedcChannels(ledc_channel_t channel) ;
 void applyDutyToChannels(ledc_channel_t channel);
-void applyFrequencyToChannels();
 void checkButtonAndAct(ButtonState &btn, unsigned long now, void (*action)());
-void changeFrequency(bool increase);
+void changeFrequency(float frequency, ledc_channel_t channel);
 void changeDuty(bool increase, ledc_channel_t channel);
-void toggleFreqStepMode();
 void printStatus();
+void processFrequencyCommand(bool increase, uint32_t requestedStep, InputSource source);
 void handleRoot();
 void handleFreqUp();
 void handleFreqDown();
@@ -114,6 +119,7 @@ void handleDutyDown();
 void handleStatus();
 void handleNotFound();
 
+// ================= SETUP =================
 void setup() {
 	Serial.begin(115200);
 	delay(50);
@@ -133,6 +139,8 @@ void setup() {
 	btnFreqDown.lastRaw = digitalRead(btnFreqDown.pin);
 	btnDutyUp.lastRaw   = digitalRead(btnDutyUp.pin);
 	btnDutyDown.lastRaw = digitalRead(btnDutyDown.pin);
+
+    DEBUG_PRINTLN("Initial button states captured");
 
     configureLedcTimer(freqHz[0], CHANNEL_0);
     configureLedcTimer(freqHz[1], CHANNEL_1);
@@ -159,176 +167,298 @@ void setup() {
     DEBUG_PRINTLN("Web Server Started");
 }
 
+// ================= LOOP =================
 void loop() {
     server.handleClient();
+
 	unsigned long now = millis();
 
-	int rawFreqUp = digitalRead(FREQ_UP_PIN);
-	int rawFreqDown = digitalRead(FREQ_DOWN_PIN);
+    if (digitalRead(CHANNEL_SELECT_PIN) == LOW) {
+        ledcChannels = CHANNEL_0;
+    } else {
+        ledcChannels = CHANNEL_1;
+    }
 
-	if (rawFreqUp == LOW && rawFreqDown == LOW) {
-		if (bothFreqHeldSince == 0) {
-			bothFreqHeldSince = now;
-		}
-		if ((now - bothFreqHeldSince >= TOGGLE_HOLD_MS) && 
-			(now - lastToggleTime >= TOGGLE_SUPPRESS_MS)) {
-        	toggleFreqStepMode();
-			lastToggleTime = now;
-			delay(120);
-		}
-	} else {
-		bothFreqHeldSince = 0;
-		checkButtonAndAct(btnFreqUp, now, [](){ changeFrequency(true); });
-		checkButtonAndAct(btnFreqDown, now, [](){ changeFrequency(false); });
-		checkButtonAndAct(btnDutyUp, now, [](){ changeDuty(true); });
-		checkButtonAndAct(btnDutyDown, now, [](){ changeDuty(false); });
-	}
+    handleButton(btnFreqUp);
+    handleButton(btnFreqDown);
+    handleButton(btnDutyUp);
+    handleButton(btnDutyDown);
 
-	delay(5);
+    delay(5);
+  }
+
+// ================= BUTTON HANDLER =================
+void handleButton(ButtonState &btn)
+{
+    int raw = digitalRead(btn.pin);
+    unsigned long now = millis();
+
+    // Raw change detected ? start debounce
+    if (raw != btn.lastRaw) {
+        btn.lastChange = now;
+        btn.lastRaw = raw;
+        return;
+    }
+
+    // Wait for debounce stability
+    if ((now - btn.lastChange) < DEBOUNCE_MS)
+        return;
+
+    // Button pressed (LOW assumed)
+    if (raw == LOW) {
+        // First press detection
+        if (btn.pressStart == 0)
+        {
+            btn.pressStart = now;
+            btn.lastAction = now;
+            btn.repeating = false;
+
+            DEBUG_PRINTF("Button %d first press\n", btn.pin);
+
+            // Immediate single action
+            performButtonAction(btn.pin);
+            return;
+        }
+
+        // If not yet repeating ? check hold time
+        if (!btn.repeating) {
+            if ((now - btn.pressStart) >= INITIAL_REPEAT_DELAY) {
+                btn.repeating = true;
+                btn.lastAction = now;
+                DEBUG_PRINTF("Button %d repeat mode START\n", btn.pin);
+            }
+        } else {
+            // Fast repeating
+            if ((now - btn.lastAction) >= FAST_REPEAT_DELAY) {
+                btn.lastAction = now;
+
+                holdRepeatCount++;   // ?? increment here
+
+                performButtonAction(btn.pin);
+                DEBUG_PRINTF("Button %d REPEAT action\n", btn.pin);
+            }
+        }
+    }
+    else
+    {
+        // Only execute release logic if button was actually pressed
+        if (btn.pressStart != 0)
+        {
+            DEBUG_PRINTF("Button %d released\n", btn.pin);
+
+            btn.pressStart = 0;
+            btn.repeating = false;
+
+            holdRepeatCount = 0;
+            smartStepMode = false;
+
+            DEBUG_PRINTLN("holdRepeatCount reset to 0 and smartStepMode disabled");
+        }
+    }
 }
 
-void checkButtonAndAct(ButtonState &btn, unsigned long now, void (*action)()) {
-	int raw = digitalRead(btn.pin);
-	if (raw != btn.lastRaw) {
-		btn.lastChange = now;
-		btn.lastRaw = raw;
-		return;
-	}
-	if ((now - btn.lastChange) >= DEBOUNCE_MS) {
-		if (raw == LOW) {
-			if ((now - btn.lastAction) >= REPEAT_SUPPRESS_MS) {
-				action();
-				btn.lastAction = now;
-			}
-		}
-	}
+void performButtonAction(int pin)
+{
+    switch (pin)
+    {
+        case FREQ_UP_PIN:
+            processFrequencyCommand(true, 1, INPUT_BUTTON);
+            break;
+
+        case FREQ_DOWN_PIN:
+            processFrequencyCommand(false, 1, INPUT_BUTTON);
+            break;
+
+        case DUTY_UP_PIN:
+            DEBUG_PRINTLN("Duty UP");
+            changeDuty(true, ledcChannels);
+            break;
+
+        case DUTY_DOWN_PIN:
+            DEBUG_PRINTLN("Duty DOWN");
+            changeDuty(false, ledcChannels);
+            break;
+    }
 }
 
-void toggleFreqStepMode() {
-  freqStepFineMode = !freqStepFineMode;
-  currentFreqStep = freqStepFineMode ? FREQ_STEP_FINE : FREQ_STEP_COARSE;
-  Serial.printf("Toggled frequency step -> %s (%lu Hz)\n", freqStepFineMode ? "FINE" : "COARSE", currentFreqStep);
-  printStatus();
+// ================= CHANGE FREQ =================
+void changeFrequency(unsigned long frequency, ledc_channel_t channel) {
+    DEBUG_PRINTF("\n=== FREQUENCY DEBUG START ===\n");
+    DEBUG_PRINTF("Channel: %d\n", channel);
+    DEBUG_PRINTF("New Frequency: %lu Hz\n", frequency);
+    esp_err_t err = ledc_set_freq(SPEED_MODE, (channel == CHANNEL_0)? TIMER0_SEL : TIMER1_SEL, frequency);
 }
 
-void changeFrequency(bool increase) {
-  	unsigned long newFreq = freqHz;
-  	if (increase) {
-	    newFreq = freqHz + currentFreqStep;
-	    if (newFreq > MAX_FREQ) {
-			newFreq = MAX_FREQ;
-		}
-	} else {
-	    if (freqHz > currentFreqStep) {
-			newFreq = freqHz - currentFreqStep;
-		} else {
-			newFreq = MIN_FREQ;
-		}
-	    if (newFreq < MIN_FREQ) {
-			newFreq = MIN_FREQ;
-		}
-	}
+// ================= CHANGE DUTY =================
+void changeDuty(bool increase, ledc_channel_t channel) {
+    float newDuty = (channel == CHANNEL_0) ? duty[0] : duty[1];
 
-	if (newFreq != freqHz) {
-		Serial.printf("Frequency: %lu -> %lu requested\n", freqHz, newFreq);
-	    freqHz = newFreq;
-	    applyFrequencyToChannels();
+    if (increase) {
+        newDuty = min((channel == CHANNEL_0) ? duty[0] : duty[1] + DUTY_STEP, 1.0f);
+    } else {
+        newDuty = max((channel == CHANNEL_0) ? duty[0] : duty[1] - DUTY_STEP, 0.0f);
+    }
 
-	    // Toggle debug pin to produce one pulse per frequency change (for scope)
-	    digitalWrite(DEBUG_TOGGLE_PIN, !digitalRead(DEBUG_TOGGLE_PIN));
+    if (fabs(newDuty - ((channel == CHANNEL_0) ? duty[0] : duty[1])) > 1e-6) {
+        DEBUG_PRINTF("Duty change: %.2f -> %.2f\n", (channel == CHANNEL_0) ? duty[0] : duty[1], newDuty);
 
-	    printStatus();
-	}
+        if (channel == CHANNEL_0) {
+            duty[0] = newDuty;
+        } else {
+            duty[1] = newDuty;
+        }
+        applyDutyToChannels(channel);
+        printStatus();
+    }
 }
 
-void changeDuty(bool increase) {
-	float newDuty = duty;
-	if (increase) {
-		newDuty = duty + DUTY_STEP;
-	}
-	if (newDuty > 1.0f) {
-		newDuty = 1.0f;
-	} else {
-		newDuty = duty - DUTY_STEP;
-		if (newDuty < 0.0f) {
-			newDuty = 0.0f;
-		}
-	}
-	if (fabs(newDuty - duty) > 1e-6) {
-		duty = newDuty;
-		applyDutyToChannels();
-		printStatus();
-	}
+// ================= LEDC CONFIG =================
+void configureLedcTimer(unsigned long frequencyHz, ledc_channel_t channel)
+{
+    DEBUG_PRINTF("Configuring timer: %lu Hz\n", frequencyHz);
+
+    ledc_clk_cfg_t selected_clk;
+    uint32_t src_clk_freq;
+
+    // ---------- Clock Selection ----------
+    if (frequencyHz < 976)
+    {
+        selected_clk = LEDC_USE_REF_TICK;   // 1 MHz
+        src_clk_freq = 1000000;
+        DEBUG_PRINTLN("Using REF_TICK (1 MHz)");
+    }
+    else
+    {
+        selected_clk = LEDC_USE_APB_CLK;    // 80 MHz
+        src_clk_freq = 80000000;
+        DEBUG_PRINTLN("Using APB_CLK (80 MHz)");
+    }
+
+    // ---------- Configure Timer ----------
+    ledc_timer_config_t ledc_timer = {};
+    ledc_timer.speed_mode = SPEED_MODE;
+    ledc_timer.timer_num = (channel == CHANNEL_0) ? TIMER0_SEL : TIMER1_SEL;
+    ledc_timer.freq_hz = frequencyHz;
+    ledc_timer.duty_resolution = LEDC_RES;//(ledc_timer_bit_t)duty_resolution;
+    ledc_timer.clk_cfg = selected_clk;
+
+    esp_err_t err = ledc_timer_config(&ledc_timer);
+
+    if (err != ESP_OK)
+    {
+        DEBUG_PRINTF("Timer config failed: %d\n", err);
+        return;
+    }
+
+    DEBUG_PRINTLN("Timer configured successfully");
 }
 
-// always zero-init structs to avoid stray fields, and reconfigure channels after timer update
-void configureLedcTimer(unsigned long frequencyHz) {
-	ledc_timer_config_t ledc_timer;
-	memset(&ledc_timer, 0, sizeof(ledc_timer));
-	ledc_timer.speed_mode = SPEED_MODE;
-	ledc_timer.duty_resolution = LEDC_RES;
-	ledc_timer.timer_num = TIMER_SEL;
-	ledc_timer.freq_hz = frequencyHz;
-	ledc_timer.clk_cfg = LEDC_AUTO_CLK;
-	esp_err_t err = ledc_timer_config(&ledc_timer);
-	if (err != ESP_OK) {
-		Serial.printf("ledc_timer_config err=%d\n", (int)err);
-	} else {
-		Serial.printf("ledc_timer_config OK freq=%lu\n", frequencyHz);
-	}
+void configureLedcChannels(ledc_channel_t channel) {
+
+    if (!ledc_get_freq(SPEED_MODE, TIMER0_SEL)) {
+        DEBUG_PRINTLN("Timer not active. Skipping channel config.");
+        return;
+    }
+
+
+    DEBUG_PRINTLN("Configuring LEDC channels");
+
+    ledc_channel_config_t ch = {};
+
+    ch.channel = (channel == CHANNEL_0)? CHANNEL_0 : CHANNEL_1;
+    ch.duty = 0;
+    ch.gpio_num = (channel == CHANNEL_0)? PWM1_PIN : PWM2_PIN;
+    ch.speed_mode = SPEED_MODE;
+    ch.hpoint = 0;
+    ch.timer_sel = (channel == CHANNEL_0)? TIMER0_SEL : TIMER1_SEL;
+
+    DEBUG_PRINTF("Channel %d -> GPIO %d\n", ch.channel, ch.gpio_num);
+    esp_err_t err = ledc_channel_config(&ch);
+    DEBUG_PRINTF("Channel %d config result: %d\n", ch.channel, err);
+    applyDutyToChannels(channel);
 }
 
-void configureLedcChannels() {
-	ledc_channel_config_t ch;
-	memset(&ch, 0, sizeof(ch));
-	ch.channel = CHANNEL_0;
-	ch.duty = 0;
-	ch.gpio_num = PWM1_PIN;
-	ch.speed_mode = SPEED_MODE;
-	ch.hpoint = 0;
-	ch.timer_sel = TIMER_SEL;
-	esp_err_t err = ledc_channel_config(&ch);
-	if (err != ESP_OK) {
-		Serial.printf("ch0 config err=%d\n", (int)err);
-	}
+// ================= DUTY APPLY =================
+void applyDutyToChannels(ledc_channel_t channel) {
+  int maxVal = (1 << PWM_RESOLUTION) - 1;
+  int dutyVal = constrain((int)round((channel == CHANNEL_0 ? duty[0] : duty[1]) * maxVal), 0, maxVal);
 
-	memset(&ch, 0, sizeof(ch));
-	ch.channel = CHANNEL_1;
-	ch.duty = 0;
-	ch.gpio_num = PWM2_PIN;
-	ch.speed_mode = SPEED_MODE;
-	ch.hpoint = 0;
-	ch.timer_sel = TIMER_SEL;
-	err = ledc_channel_config(&ch);
-	if (err != ESP_OK) {
-		Serial.printf("ch1 config err=%d\n", (int)err);
-	}
+  DEBUG_PRINTF("Applying duty: %.2f -> raw %d (max %d)\n",
+               channel == CHANNEL_0 ? duty[0] : duty[1], dutyVal, maxVal);
 
-	applyDutyToChannels();
+  ledc_set_duty(SPEED_MODE, channel, dutyVal);
+  ledc_update_duty(SPEED_MODE, channel);
 }
 
-void applyFrequencyToChannels() {
-	// Reconfigure timer, then re-configure channels to ensure the new timer is used by channels.
-	configureLedcTimer(freqHz);
-	configureLedcChannels();
+void processFrequencyCommand(bool increase, uint32_t requestedStep, InputSource source)
+{
+    unsigned long current = freqHz[ledcChannels];
+    unsigned long step = requestedStep;
+
+    // ================= SMART MODE (ONLY FOR BUTTON) =================
+    if (source == INPUT_BUTTON)
+    {
+        if (holdRepeatCount >= 10)
+            smartStepMode = true;
+
+        if (!smartStepMode)
+        {
+            step = 1;
+        }
+        else
+        {
+            if (current < 100)
+                step = 10;
+            else if (current < 1000)
+                step = 100;
+            else
+                step = 1000;
+        }
+    }
+
+    // ================= CALCULATE NEW FREQUENCY =================
+    unsigned long newFreq;
+
+    if (increase)
+        newFreq = current + step;
+    else
+        newFreq = (current > step) ? current - step : MIN_FREQ;
+
+    if (newFreq > MAX_FREQ)
+        newFreq = MAX_FREQ;
+
+    if (newFreq < MIN_FREQ)
+        newFreq = MIN_FREQ;
+
+    // ================= 976 Hz TIMER CROSSING HANDLING =================
+    if ((current <= 976 && newFreq > 976) ||
+        (current > 976 && newFreq <= 976))
+    {
+        configureLedcTimer(newFreq, ledcChannels);
+    }
+
+    // ================= APPLY =================
+    freqHz[ledcChannels] = newFreq;
+    changeFrequency(newFreq, ledcChannels);
+
+    DEBUG_PRINTF("SRC:%s | Step:%lu | New:%lu | Repeat:%u\n",
+        (source == INPUT_BUTTON) ? "BTN" : "WEB",
+        step,
+        newFreq,
+        holdRepeatCount);
 }
 
-void applyDutyToChannels() {
-	int maxVal = (1 << PWM_RESOLUTION) - 1;
-	int dutyVal = constrain((int)round(duty * (float)maxVal), 0, maxVal);
-	ledc_set_duty(SPEED_MODE, CHANNEL_0, dutyVal);
-	ledc_update_duty(SPEED_MODE, CHANNEL_0);
-	ledc_set_duty(SPEED_MODE, CHANNEL_1, dutyVal);
-	ledc_update_duty(SPEED_MODE, CHANNEL_1);
-}
-
+// ================= STATUS =================
 void printStatus() {
-	Serial.printf("Freq: %lu Hz | Duty: %.0f%% | Mode: %s (step %lu Hz)\n", 
-					freqHz, 
-					duty * 100.0f, 
-					freqStepFineMode ? "FINE" : "COARSE", 
-					currentFreqStep);
+    DEBUG_PRINTF("STATUS | Freq1: %lu Hz | Freq2: %lu Hz | Duty1: %.0f%% | Duty2: %.0f%% | Mode: %s (step %lu Hz)\n",
+                freqHz[0],
+                freqHz[1],
+                duty[0] * 100.0f,
+                duty[1] * 100.0f,
+                freqStepFineMode ? "FINE" : "COARSE",
+                currentFreqStep);
 }
+
 const char MAIN_page[] PROGMEM = R"====(
 <!DOCTYPE html>
 <html>
