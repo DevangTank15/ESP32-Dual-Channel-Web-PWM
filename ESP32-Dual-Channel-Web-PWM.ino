@@ -11,6 +11,11 @@
 
 #include <Arduino.h>
 #include "driver/ledc.h"
+#include <WiFi.h>
+
+// ================WIFI CONFIG================
+const char* ssid = "ESP32_PWM";
+const char* password = "12345678";
 
 // --- Pins ---
 const int PWM1_PIN = 18; // LEDC channel 0
@@ -53,6 +58,7 @@ const unsigned long TOGGLE_HOLD_MS = 800;
 unsigned long bothFreqHeldSince = 0;
 unsigned long lastToggleTime = 0;
 const unsigned long TOGGLE_SUPPRESS_MS = 1000;
+
 // Button state
 struct ButtonState {
   int pin;
@@ -99,6 +105,7 @@ void setup() {
 
   	Serial.println("Dual PWM ready");
   	printStatus();
+    WiFi.softAP(ssid, password);
 }
 
 void loop() {
@@ -252,12 +259,12 @@ void applyFrequencyToChannels() {
 }
 
 void applyDutyToChannels() {
-  int maxVal = (1 << PWM_RESOLUTION) - 1;
-  int dutyVal = constrain((int)round(duty * (float)maxVal), 0, maxVal);
-  ledc_set_duty(SPEED_MODE, CHANNEL_0, dutyVal);
-  ledc_update_duty(SPEED_MODE, CHANNEL_0);
-  ledc_set_duty(SPEED_MODE, CHANNEL_1, dutyVal);
-  ledc_update_duty(SPEED_MODE, CHANNEL_1);
+	int maxVal = (1 << PWM_RESOLUTION) - 1;
+	int dutyVal = constrain((int)round(duty * (float)maxVal), 0, maxVal);
+	ledc_set_duty(SPEED_MODE, CHANNEL_0, dutyVal);
+	ledc_update_duty(SPEED_MODE, CHANNEL_0);
+	ledc_set_duty(SPEED_MODE, CHANNEL_1, dutyVal);
+	ledc_update_duty(SPEED_MODE, CHANNEL_1);
 }
 
 void printStatus() {
