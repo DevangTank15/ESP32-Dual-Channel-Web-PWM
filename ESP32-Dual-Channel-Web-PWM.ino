@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include "driver/ledc.h"
 #include <WiFi.h>
+#include <WebServer.h>
 
 // ================WIFI CONFIG================
 const char* ssid = "ESP32_PWM";
@@ -39,6 +40,7 @@ const char* password = "12345678";
 #define FREQ_DOWN_PIN       14
 #define DUTY_UP_PIN         26
 #define DUTY_DOWN_PIN       27
+#define CHANNEL_SELECT_PIN  25
 #define DEBUG_TOGGLE_PIN    2
 // LEDC config
 #define CHANNEL_0 LEDC_CHANNEL_0
@@ -52,9 +54,9 @@ const char* password = "12345678";
 // Frequency/duty variables
 #define MIN_FREQ 10UL
 #define MAX_FREQ 10000UL
-unsigned long freqHz = MIN_FREQ;
-
-float duty = 0.5f; // 0..1
+unsigned long freqHz[2] = {MIN_FREQ, MIN_FREQ};
+float duty[2] = {0.5f, 0.5f};
+ledc_channel_t ledcChannels = CHANNEL_0;
 
 // Steps
 #define FREQ_STEP_FINE 1
@@ -74,7 +76,11 @@ bool freqStepFineMode = true;
 
 unsigned long bothFreqHeldSince = 0;
 unsigned long lastToggleTime = 0;
-const unsigned long TOGGLE_SUPPRESS_MS = 1000;
+
+enum InputSource {
+    INPUT_BUTTON,
+    INPUT_WEB
+};
 
 // Button state
 struct ButtonState {
@@ -88,15 +94,25 @@ ButtonState btnFreqDown = {FREQ_DOWN_PIN,  HIGH, 0, 0};
 ButtonState btnDutyUp   = {DUTY_UP_PIN,    HIGH, 0, 0};
 ButtonState btnDutyDown = {DUTY_DOWN_PIN,  HIGH, 0, 0};
 
-void configureLedcTimer(unsigned long frequencyHz);
-void configureLedcChannels();
-void applyDutyToChannels();
+WebServer server(80);
+
+// Prototypes
+void configureLedcTimer(unsigned long frequencyHz, ledc_channel_t channel);
+void configureLedcChannels(ledc_channel_t channel) ;
+void applyDutyToChannels(ledc_channel_t channel);
 void applyFrequencyToChannels();
 void checkButtonAndAct(ButtonState &btn, unsigned long now, void (*action)());
 void changeFrequency(bool increase);
-void changeDuty(bool increase);
+void changeDuty(bool increase, ledc_channel_t channel);
 void toggleFreqStepMode();
 void printStatus();
+void handleRoot();
+void handleFreqUp();
+void handleFreqDown();
+void handleDutyUp();
+void handleDutyDown();
+void handleStatus();
+void handleNotFound();
 
 void setup() {
 	Serial.begin(115200);
@@ -109,6 +125,7 @@ void setup() {
 	pinMode(DUTY_DOWN_PIN, INPUT_PULLUP);
 
 	pinMode(DEBUG_TOGGLE_PIN, OUTPUT);
+    pinMode(CHANNEL_SELECT_PIN, INPUT);
 	digitalWrite(DEBUG_TOGGLE_PIN, LOW);
 
 	// initialize lastRaw
@@ -117,16 +134,33 @@ void setup() {
 	btnDutyUp.lastRaw   = digitalRead(btnDutyUp.pin);
 	btnDutyDown.lastRaw = digitalRead(btnDutyDown.pin);
 
-    configureLedcTimer(freqHz);
-  	configureLedcChannels();
-  	applyDutyToChannels();
+    configureLedcTimer(freqHz[0], CHANNEL_0);
+    configureLedcTimer(freqHz[1], CHANNEL_1);
+    configureLedcChannels(CHANNEL_0);
+    configureLedcChannels(CHANNEL_1);
 
-  	Serial.println("Dual PWM ready");
-  	printStatus();
+    printStatus();
+
     WiFi.softAP(ssid, password);
+
+    Serial.println("Access Point Started");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.softAPIP());
+
+    server.on("/", handleRoot);
+    server.on("/frequp", handleFreqUp);
+    server.on("/freqdown", handleFreqDown);
+    server.on("/dutyup", handleDutyUp);
+    server.on("/dutydown", handleDutyDown);
+    server.on("/status", handleStatus);
+    server.onNotFound(handleNotFound);
+
+    server.begin();
+    DEBUG_PRINTLN("Web Server Started");
 }
 
 void loop() {
+    server.handleClient();
 	unsigned long now = millis();
 
 	int rawFreqUp = digitalRead(FREQ_UP_PIN);
@@ -294,4 +328,125 @@ void printStatus() {
 					duty * 100.0f, 
 					freqStepFineMode ? "FINE" : "COARSE", 
 					currentFreqStep);
+}
+const char MAIN_page[] PROGMEM = R"====(
+<!DOCTYPE html>
+<html>
+<head>
+<title>ESP32 PWM Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: Arial; text-align: center; }
+button { width: 120px; height: 50px; font-size: 18px; margin: 10px; }
+.value { font-size: 22px; margin: 10px; }
+</style>
+</head>
+<body>
+<h2>ESP32 PWM Controller</h2>
+<div class="value">
+Frequency Channel 0: <span id="freq0">0</span> Hz
+</div>
+<div class="value">
+Duty Channel 0: <span id="duty0">0</span> %
+</div>
+<div class="value">
+Frequency Channel 1: <span id="freq1">0</span> Hz
+</div>
+<div class="value">
+Duty Channel 1: <span id="duty1">0</span> %
+</div>
+<div class="value">
+Selected Channel: <span id="channel">0</span>
+</div>
+<h3>Frequency</h3>
+<button onclick="changeFreq('/frequp')">Freq +</button>
+<button onclick="changeFreq('/freqdown')">Freq -</button>
+<select id="stepSelect">
+<option value="1">1</option>
+<option value="10">10</option>
+<option value="100">100</option>
+<option value="1000">1000</option>
+</select>
+<h3>Duty</h3>
+<button onclick="sendCmd('/dutyup')">Duty +</button>
+<button onclick="sendCmd('/dutydown')">Duty -</button>
+<script>
+function sendCmd(url) {fetch(url);}
+function changeFreq(baseUrl) {var step = document.getElementById("stepSelect").value;fetch(baseUrl + "?step=" + step);}
+function updateStatus() {
+fetch('/status')
+.then(response => response.json())
+.then(data => {
+document.getElementById('freq0').innerText = data.freq0;
+document.getElementById('duty0').innerText = data.duty0;
+document.getElementById('freq1').innerText = data.freq1;
+document.getElementById('duty1').innerText = data.duty1;
+document.getElementById('channel').innerText = data.channel;});}
+setInterval(updateStatus, 1000);
+updateStatus();
+</script>
+</body>
+</html>
+)====";
+
+// Root Page Handler
+void handleRoot() {
+    server.send_P(200, "text/html", MAIN_page);
+    DEBUG_PRINT("Root code Request Jquery");
+}
+
+// Frequency button jquery handlers
+void handleFreqUp()
+{
+    uint32_t step = 1;
+
+    if (server.hasArg("step"))
+        step = server.arg("step").toInt();
+
+    processFrequencyCommand(true, step, INPUT_WEB);
+
+    server.send(200, "text/plain", "OK");
+}
+
+void handleFreqDown()
+{
+    uint32_t step = 1;
+
+    if (server.hasArg("step"))
+        step = server.arg("step").toInt();
+
+    processFrequencyCommand(false, step, INPUT_WEB);
+
+    server.send(200, "text/plain", "OK");
+}
+
+// Duty button jquery handlers
+void handleDutyUp() {
+    changeDuty(true, ledcChannels);
+    server.send(200, "text/plain", "OK");
+    DEBUG_PRINT("Duty Cycle UP Jquery");
+}
+
+void handleDutyDown() {
+  changeDuty(false, ledcChannels);
+  server.send(200, "text/plain", "OK");
+  DEBUG_PRINT("Duty Cycle Down Jquery");
+}
+
+void handleStatus() {
+  String json = "{";
+  json += "\"freq0\":" + String(freqHz[0]) + ",";
+  json += "\"duty0\":" + String(duty[0] * 100.0f, 1) + ",";
+  json += "\"freq1\":" + String(freqHz[1]) + ",";
+  json += "\"duty1\":" + String(duty[1] * 100.0f, 1) + ",";
+  json += "\"channel\":" + String((ledcChannels == CHANNEL_0) ? "0" : "1");
+  json += "}";
+
+  server.send(200, "application/json", json);
+  DEBUG_PRINTLN(json);
+}
+
+void handleNotFound() {
+    Serial.println("Unknown URL hit");
+    server.send(404, "text/plain", "Not found");
 }
