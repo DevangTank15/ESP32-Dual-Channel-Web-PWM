@@ -183,6 +183,7 @@ void changeDuty(bool increase) {
 	float newDuty = duty;
 	if (increase) {
 		newDuty = duty + DUTY_STEP;
+	}
 	if (newDuty > 1.0f) {
 		newDuty = 1.0f;
 	} else {
