@@ -19,7 +19,7 @@ const char* ssid = "ESP32_PWM";
 const char* password = "12345678";
 
 // ================= DEBUG CONTROL =================
-#define DEBUG_ENABLED 1
+//#define DEBUG_ENABLED 1
 
 #if DEBUG_ENABLED
   #define DEBUG_PRINT(x) Serial.print(x)
@@ -33,46 +33,52 @@ const char* password = "12345678";
 // =================================================
 
 // --- Pins ---
-#define PWM1_PIN            18
-#define PWM2_PIN            19
+#define PWM1_PIN                18
+#define PWM2_PIN                19
 
-#define FREQ_UP_PIN         12
-#define FREQ_DOWN_PIN       14
-#define DUTY_UP_PIN         26
-#define DUTY_DOWN_PIN       27
-#define CHANNEL_SELECT_PIN  25
-#define DEBUG_TOGGLE_PIN    2
+#define FREQ_UP_PIN             12
+#define FREQ_DOWN_PIN           14
+#define DUTY_UP_PIN             26
+#define DUTY_DOWN_PIN           27
+#define CHANNEL_0_ENABLE_PIN    2
+#define CHANNEL_1_ENABLE_PIN    23
+
+bool channelEnabled[2] = {false, false};
+
+#define CHANNEL_ENABLE          HIGH
+#define CHANNEL_DISABLE         LOW
+
 // LEDC config
-#define CHANNEL_0 LEDC_CHANNEL_0
-#define CHANNEL_1 LEDC_CHANNEL_1
-#define TIMER0_SEL LEDC_TIMER_0
-#define TIMER1_SEL LEDC_TIMER_1
-#define SPEED_MODE LEDC_HIGH_SPEED_MODE
-#define PWM_RESOLUTION 10
-#define LEDC_RES LEDC_TIMER_10_BIT
+#define CHANNEL_0               LEDC_CHANNEL_0
+#define CHANNEL_1               LEDC_CHANNEL_1
+#define TIMER0_SEL              LEDC_TIMER_0
+#define TIMER1_SEL              LEDC_TIMER_1
+#define SPEED_MODE              LEDC_HIGH_SPEED_MODE
+#define PWM_RESOLUTION          10
+#define LEDC_RES                LEDC_TIMER_10_BIT
 
 // Frequency/duty variables
-#define MIN_FREQ 10UL
-#define MAX_FREQ 10000UL
+#define MIN_FREQ                10UL
+#define MAX_FREQ                10000UL
 unsigned long freqHz[2] = {MIN_FREQ, MIN_FREQ};
 float duty[2] = {0.5f, 0.5f};
 ledc_channel_t ledcChannels = CHANNEL_0;
 
 // Steps
-#define FREQ_STEP_FINE 1
-#define FREQ_STEP_COARSE 5
+#define FREQ_STEP_FINE          1
+#define FREQ_STEP_COARSE        5
 unsigned long currentFreqStep = FREQ_STEP_FINE;
 bool freqStepFineMode = true;
-#define DUTY_STEP 0.05f
+#define DUTY_STEP               0.05f
 
 // Timing
-#define DEBOUNCE_MS 40UL
-#define REPEAT_SUPPRESS_MS 120UL
-#define TOGGLE_HOLD_MS 800UL
-#define TOGGLE_SUPPRESS_MS 1000UL
+#define DEBOUNCE_MS             40UL
+#define REPEAT_SUPPRESS_MS      120UL
+#define TOGGLE_HOLD_MS          800UL
+#define TOGGLE_SUPPRESS_MS      1000UL
 
-#define INITIAL_REPEAT_DELAY 400UL   // start repeating after hold
-#define FAST_REPEAT_DELAY    100UL   // repeat speed after start
+#define INITIAL_REPEAT_DELAY    400UL   // start repeating after hold
+#define FAST_REPEAT_DELAY       100UL   // repeat speed after start
 
 unsigned int holdRepeatCount = 0;
 bool smartStepMode = false;
@@ -130,9 +136,11 @@ void setup() {
 	pinMode(DUTY_UP_PIN, INPUT_PULLUP);
 	pinMode(DUTY_DOWN_PIN, INPUT_PULLUP);
 
-	pinMode(DEBUG_TOGGLE_PIN, OUTPUT);
-    pinMode(CHANNEL_SELECT_PIN, INPUT);
-	digitalWrite(DEBUG_TOGGLE_PIN, LOW);
+	pinMode(CHANNEL_0_ENABLE_PIN, OUTPUT);
+    pinMode(CHANNEL_1_ENABLE_PIN, OUTPUT);
+
+	digitalWrite(CHANNEL_0_ENABLE_PIN, CHANNEL_DISABLE);
+	digitalWrite(CHANNEL_1_ENABLE_PIN, CHANNEL_DISABLE);
 
 	// initialize lastRaw
 	btnFreqUp.lastRaw   = digitalRead(btnFreqUp.pin);
@@ -161,6 +169,9 @@ void setup() {
     server.on("/dutyup", handleDutyUp);
     server.on("/dutydown", handleDutyDown);
     server.on("/status", handleStatus);
+    server.on("/channelEnable", handleChannelEnable);
+    server.on("/selectChannel", handleSelectChannel);
+    server.on("/status", handleStatus);
     server.onNotFound(handleNotFound);
 
     server.begin();
@@ -172,12 +183,6 @@ void loop() {
     server.handleClient();
 
 	unsigned long now = millis();
-
-    if (digitalRead(CHANNEL_SELECT_PIN) == LOW) {
-        ledcChannels = CHANNEL_0;
-    } else {
-        ledcChannels = CHANNEL_1;
-    }
 
     handleButton(btnFreqUp);
     handleButton(btnFreqDown);
@@ -290,23 +295,20 @@ void changeFrequency(unsigned long frequency, ledc_channel_t channel) {
 }
 
 // ================= CHANGE DUTY =================
-void changeDuty(bool increase, ledc_channel_t channel) {
-    float newDuty = (channel == CHANNEL_0) ? duty[0] : duty[1];
+void changeDuty(bool increase, ledc_channel_t channel)
+{
+    float &currentDuty = (channel == CHANNEL_0) ? duty[0] : duty[1];
+
+    float oldDuty = currentDuty;
 
     if (increase) {
-        newDuty = min((channel == CHANNEL_0) ? duty[0] : duty[1] + DUTY_STEP, 1.0f);
+        currentDuty = min(currentDuty + DUTY_STEP, 1.0f);
     } else {
-        newDuty = max((channel == CHANNEL_0) ? duty[0] : duty[1] - DUTY_STEP, 0.0f);
+        currentDuty = max(currentDuty - DUTY_STEP, 0.0f);
     }
 
-    if (fabs(newDuty - ((channel == CHANNEL_0) ? duty[0] : duty[1])) > 1e-6) {
-        DEBUG_PRINTF("Duty change: %.2f -> %.2f\n", (channel == CHANNEL_0) ? duty[0] : duty[1], newDuty);
-
-        if (channel == CHANNEL_0) {
-            duty[0] = newDuty;
-        } else {
-            duty[1] = newDuty;
-        }
+    if (fabs(currentDuty - oldDuty) > 1e-6) {
+        DEBUG_PRINTF("Duty change: %.2f -> %.2f\n", oldDuty, currentDuty);
         applyDutyToChannels(channel);
         printStatus();
     }
@@ -467,27 +469,28 @@ const char MAIN_page[] PROGMEM = R"====(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 body { font-family: Arial; text-align: center; }
-button { width: 120px; height: 50px; font-size: 18px; margin: 10px; }
-.value { font-size: 22px; margin: 10px; }
+button { width:120px; height: 50px; font-size: 18px; margin: 10px; }
+.value { font-size:22px; margin: 10px; }
+.toggle { width: 50px;height: 25px;appearance: none;background: #ccc;border-radius: 25px;position: relative;cursor: pointer;outline: none;transition: 0.3s;}
+.toggle:checked { background: #4CAF50;}
+.toggle::before { content: "";width: 21px;height: 21px;background: white;position: absolute;top: 2px;left: 2px;border-radius: 50%;transition: 0.3s;}
+.toggle:checked::before { transform: translateX(25px);}
+h3 { font-size: 24px; }
+.channel-label {font-size: 22px;margin: 12px;display: flex;justify-content: center;align-items: center;gap: 15px;}
 </style>
 </head>
 <body>
 <h2>ESP32 PWM Controller</h2>
-<div class="value">
-Frequency Channel 0: <span id="freq0">0</span> Hz
-</div>
-<div class="value">
-Duty Channel 0: <span id="duty0">0</span> %
-</div>
-<div class="value">
-Frequency Channel 1: <span id="freq1">0</span> Hz
-</div>
-<div class="value">
-Duty Channel 1: <span id="duty1">0</span> %
-</div>
-<div class="value">
-Selected Channel: <span id="channel">0</span>
-</div>
+<div class="value">Frequency Channel 0: <span id="freq0">0</span> Hz</div>
+<div class="value">Duty Channel 0: <span id="duty0">0</span> %</div>
+<div class="value">Frequency Channel 1: <span id="freq1">0</span> Hz</div>
+<div class="value">Duty Channel 1: <span id="duty1">0</span> %</div>
+<div class="value">Selected Channel: <span id="channel">0</span></div>
+<h3>Select Active Channel</h3>
+<div class="channel-label">Channel 0<input type="checkbox" id="chSelect" class="toggle selectSwitch">Channel 1</div>
+<h3>Channel Enable</h3>
+<div class="channel-label">Channel 0<input type="checkbox" class="toggle enableSwitch" data-ch="0"></div><br>
+<div class="channel-label">Channel 1<input type="checkbox" class="toggle enableSwitch" data-ch="1"></div>
 <h3>Frequency</h3>
 <button onclick="changeFreq('/frequp')">Freq +</button>
 <button onclick="changeFreq('/freqdown')">Freq -</button>
@@ -501,6 +504,14 @@ Selected Channel: <span id="channel">0</span>
 <button onclick="sendCmd('/dutyup')">Duty +</button>
 <button onclick="sendCmd('/dutydown')">Duty -</button>
 <script>
+document.getElementById("chSelect").addEventListener("change", function() {let ch = this.checked ? 1 : 0;fetch("/selectChannel?ch=" + ch);document.getElementById('channel').innerText = ch;});
+document.querySelectorAll(".enableSwitch").forEach(el => {
+    el.addEventListener("change", function() {
+        let ch = this.dataset.ch;
+        let state = this.checked ? 1 : 0;
+        fetch("/channelEnable?ch=" + ch + "&state=" + state);
+    });
+});
 function sendCmd(url) {fetch(url);}
 function changeFreq(baseUrl) {var step = document.getElementById("stepSelect").value;fetch(baseUrl + "?step=" + step);}
 function updateStatus() {
@@ -511,7 +522,8 @@ document.getElementById('freq0').innerText = data.freq0;
 document.getElementById('duty0').innerText = data.duty0;
 document.getElementById('freq1').innerText = data.freq1;
 document.getElementById('duty1').innerText = data.duty1;
-document.getElementById('channel').innerText = data.channel;});}
+}).catch(error => console.error('Error fetching status:', error));
+}
 setInterval(updateStatus, 1000);
 updateStatus();
 </script>
@@ -554,29 +566,84 @@ void handleFreqDown()
 void handleDutyUp() {
     changeDuty(true, ledcChannels);
     server.send(200, "text/plain", "OK");
-    DEBUG_PRINT("Duty Cycle UP Jquery");
+    DEBUG_PRINTLN("Duty Cycle UP Jquery");
 }
 
 void handleDutyDown() {
   changeDuty(false, ledcChannels);
   server.send(200, "text/plain", "OK");
-  DEBUG_PRINT("Duty Cycle Down Jquery");
+  DEBUG_PRINTLN("Duty Cycle Down Jquery");
 }
 
 void handleStatus() {
-  String json = "{";
-  json += "\"freq0\":" + String(freqHz[0]) + ",";
-  json += "\"duty0\":" + String(duty[0] * 100.0f, 1) + ",";
-  json += "\"freq1\":" + String(freqHz[1]) + ",";
-  json += "\"duty1\":" + String(duty[1] * 100.0f, 1) + ",";
-  json += "\"channel\":" + String((ledcChannels == CHANNEL_0) ? "0" : "1");
-  json += "}";
+    String json = "{";
 
-  server.send(200, "application/json", json);
-  DEBUG_PRINTLN(json);
+    json += "\"freq0\":" + String(freqHz[0]) + ",";
+    json += "\"duty0\":" + String(duty[0] * 100.0f, 1) + ",";
+    json += "\"freq1\":" + String(freqHz[1]) + ",";
+    json += "\"duty1\":" + String(duty[1] * 100.0f, 1) + ",";
+    json += "\"channel\":" + String((ledcChannels == CHANNEL_0) ? 0 : 1) + ",";
+    json += "\"ch0\":" + String(channelEnabled[0] ? "true" : "false") + ",";
+    json += "\"ch1\":" + String(channelEnabled[1] ? "true" : "false");
+
+    json += "}";
+    DEBUG_PRINTLN("Status JSON: " + json);
+
+    server.send(200, "application/json", json);
 }
 
 void handleNotFound() {
     Serial.println("Unknown URL hit");
     server.send(404, "text/plain", "Not found");
+}
+
+void handleChannelEnable()
+{
+    if (!server.hasArg("ch") || !server.hasArg("state"))
+    {
+        server.send(400, "text/plain", "Bad Request");
+        return;
+    }
+
+    int ch = server.arg("ch").toInt();
+    int state = server.arg("state").toInt();
+
+    if (ch < 0 || ch > 1)
+    {
+        server.send(400, "text/plain", "Invalid Channel");
+        return;
+    }
+
+    channelEnabled[ch] = (state == 1);
+
+    if (ch == 0)
+        digitalWrite(CHANNEL_0_ENABLE_PIN, channelEnabled[0] ? HIGH : LOW);
+    else
+        digitalWrite(CHANNEL_1_ENABLE_PIN, channelEnabled[1] ? HIGH : LOW);
+
+    server.send(200, "text/plain", "OK");
+    DEBUG_PRINTLN("Channel " + String(ch) + " enable state: " + (channelEnabled[ch] ? "ENABLED" : "DISABLED"));
+}
+
+void handleSelectChannel()
+{
+    if (!server.hasArg("ch"))
+    {
+        server.send(400, "text/plain", "Bad Request");
+        return;
+    }
+
+    int ch = server.arg("ch").toInt();
+
+    if (ch < 0 || ch > 1)
+    {
+        server.send(400, "text/plain", "Invalid Channel");
+        return;
+    }
+
+    // Update active channel
+    ledcChannels = (ch == 0) ? CHANNEL_0 : CHANNEL_1;
+
+    server.send(200, "text/plain", "OK");
+    DEBUG_PRINTLN("Selected active channel: " + String(ch));
 }
