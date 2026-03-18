@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>ESP32 PWM Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: Arial; text-align: center; }
+button { width:120px; height: 50px; font-size: 18px; margin: 10px; }
+.value { font-size:22px; margin: 10px; }
+.toggle { width: 50px;height: 25px;appearance: none;background: #ccc;border-radius: 25px;position: relative;cursor: pointer;outline: none;transition: 0.3s;}
+.toggle:checked { background: #4CAF50;}
+.toggle::before { content: "";width: 21px;height: 21px;background: white;position: absolute;top: 2px;left: 2px;border-radius: 50%;transition: 0.3s;}
+.toggle:checked::before { transform: translateX(25px);}
+h3 { font-size: 24px; }
+.channel-label {font-size: 22px;margin: 12px;display: flex;justify-content: center;align-items: center;gap: 15px;}
+</style>
+</head>
+<body>
+<h2>ESP32 PWM Controller</h2>
+<div class="value">Frequency Channel 0: <span id="freq0">0</span> Hz</div>
+<div class="value">Duty Channel 0: <span id="duty0">0</span> %</div>
+<div class="value">Frequency Channel 1: <span id="freq1">0</span> Hz</div>
+<div class="value">Duty Channel 1: <span id="duty1">0</span> %</div>
+<div class="value">Selected Channel: <span id="channel">0</span></div>
+<h3>Select Active Channel</h3>
+<div class="channel-label">Channel 0<input type="checkbox" id="chSelect" class="toggle selectSwitch">Channel 1</div>
+<h3>Channel Enable</h3>
+<div class="channel-label">Channel 0<input type="checkbox" class="toggle enableSwitch" data-ch="0"></div><br>
+<div class="channel-label">Channel 1<input type="checkbox" class="toggle enableSwitch" data-ch="1"></div>
+<h3>Frequency</h3>
+<button onclick="changeFreq('/frequp')">Freq +</button>
+<button onclick="changeFreq('/freqdown')">Freq -</button>
+<select id="stepSelect">
+<option value="1">1</option>
+<option value="10">10</option>
+<option value="100">100</option>
+<option value="1000">1000</option>
+</select>
+<h3>Duty</h3>
+<button onclick="sendCmd('/dutyup')">Duty +</button>
+<button onclick="sendCmd('/dutydown')">Duty -</button>
+<script>
+document.getElementById("chSelect").addEventListener("change", function() {let ch = this.checked ? 1 : 0;fetch("/selectChannel?ch=" + ch);document.getElementById('channel').innerText = ch;});
+document.querySelectorAll(".enableSwitch").forEach(el => {
+    el.addEventListener("change", function() {
+        let ch = this.dataset.ch;
+        let state = this.checked ? 1 : 0;
+        fetch("/channelEnable?ch=" + ch + "&state=" + state);
+    });
+});
+function sendCmd(url) {fetch(url);}
+function changeFreq(baseUrl) {var step = document.getElementById("stepSelect").value;fetch(baseUrl + "?step=" + step);}
+function updateStatus() {
+fetch('/status')
+.then(response => response.json())
+.then(data => {
+document.getElementById('freq0').innerText = data.freq0;
+document.getElementById('duty0').innerText = data.duty0;
+document.getElementById('freq1').innerText = data.freq1;
+document.getElementById('duty1').innerText = data.duty1;
+}).catch(error => console.error('Error fetching status:', error));
+}
+setInterval(updateStatus, 1000);
+updateStatus();
+</script>
+</body>
+</html>
