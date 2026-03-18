@@ -16,6 +16,8 @@
                 "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp32-libs\\3.3.7\\qio_qspi\\include",
                 "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.7\\cores\\esp32",
                 "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.7\\variants\\esp32da",
+                "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.7\\libraries\\WiFi\\src",
+                "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.7\\libraries\\Network\\src",
                 "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp-x32\\2511\\xtensa-esp-elf\\include\\c++\\14.2.0",
                 "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp-x32\\2511\\xtensa-esp-elf\\include\\c++\\14.2.0\\xtensa-esp-elf\\esp32",
                 "C:\\Users\\DEVANG\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp-x32\\2511\\xtensa-esp-elf\\include\\c++\\14.2.0\\backward",
